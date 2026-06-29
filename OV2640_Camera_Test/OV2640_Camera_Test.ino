@@ -29,6 +29,7 @@
 camera_config_t config;
 pixformat_t current_format = PIXFORMAT_GRAYSCALE;
 framesize_t current_framesize = FRAMESIZE_96X96;
+bool streaming_mode = false;
 
 String inputString = "";
 bool stringComplete = false;
@@ -45,16 +46,16 @@ const char b64_table[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz01
 // ==========================================
 bool initCameraWithConfig(pixformat_t format, framesize_t size);
 void parseCommand(String cmd);
-void captureWorkflow();
-void sendToPC(camera_fb_t *fb);
-void runLocalInference(camera_fb_t *fb);
+void captureWorkflow(bool force_logs = false);
+void sendToPC(camera_fb_t *fb, bool print_logs = true);
+void runLocalInference(camera_fb_t *fb, bool print_logs = true);
 void renderAsciiArt(const uint8_t* buf, int width, int height);
 void print_base64(const uint8_t* data, size_t length);
 const char* format_to_str(pixformat_t format);
 
 void setup() {
     // Initialize Serial Port at high baud rate for fast image transfers
-    Serial.begin(115200);
+    Serial.begin(2000000);
     while (!Serial) {
         ; // Wait for serial port to connect
     }
@@ -110,6 +111,12 @@ void loop() {
         }
     }
     lastButtonState = buttonState;
+    
+    // If streaming mode is active, continuously trigger capture workflows
+    if (streaming_mode) {
+        captureWorkflow();
+        delay(10); // Yield to keep the device responsive and not overflow serial
+    }
 }
 
 /**
@@ -205,7 +212,7 @@ void parseCommand(String cmd) {
     switch (action) {
         case 'c':
         case 'C':
-            captureWorkflow();
+            captureWorkflow(true);
             break;
             
         case 'f':
@@ -302,6 +309,11 @@ void parseCommand(String cmd) {
                 s->set_vflip(s, val ? 1 : 0);
             }
             break;
+
+        case 'd':
+        case 'D':
+            streaming_mode = (val != 0);
+            break;
             
         default:
             break;
@@ -311,9 +323,12 @@ void parseCommand(String cmd) {
 /**
  * @brief Main execution workflow. Acquires the image and channels it to two destinations.
  */
-void captureWorkflow() {
-    Serial.println("\n--- WORKFLOW INITIATED ---");
-    Serial.println("[System] Capturing frame buffer...");
+void captureWorkflow(bool force_logs) {
+    bool print_logs = !streaming_mode || force_logs;
+    if (print_logs) {
+        Serial.println("\n--- WORKFLOW INITIATED ---");
+        Serial.println("[System] Capturing frame buffer...");
+    }
     
     // Grab all currently filled buffers to empty the queue completely and force a fresh capture
     camera_fb_t * fbs[2] = {NULL, NULL};
@@ -332,36 +347,44 @@ void captureWorkflow() {
     // The next get is guaranteed to block and return a fresh real-time capture
     camera_fb_t * fb = esp_camera_fb_get();
     if (!fb) {
-        Serial.println("ERROR: Failed to acquire camera frame buffer.");
-        Serial.println("--- WORKFLOW ABORTED ---\n");
+        if (print_logs) {
+            Serial.println("ERROR: Failed to acquire camera frame buffer.");
+            Serial.println("--- WORKFLOW ABORTED ---\n");
+        }
         return;
     }
     
-    Serial.printf("[System] Frame captured! Resolution: %dx%d, Buffer size: %d bytes, Format: %s\n", 
-                  fb->width, fb->height, fb->len, format_to_str(fb->format));
+    if (print_logs) {
+        Serial.printf("[System] Frame captured! Resolution: %dx%d, Buffer size: %d bytes, Format: %s\n", 
+                      fb->width, fb->height, fb->len, format_to_str(fb->format));
+    }
                   
     // -------------------------------------------------------------
     // Destination 1: Send raw file via USB Serial back to PC
     // -------------------------------------------------------------
-    sendToPC(fb);
+    sendToPC(fb, print_logs);
     
     // -------------------------------------------------------------
     // Destination 2: Send buffer to local CV Model
     // -------------------------------------------------------------
-    runLocalInference(fb);
+    runLocalInference(fb, print_logs);
     
     // Always return the frame buffer to the pool
     esp_camera_fb_return(fb);
     
-    Serial.println("--- WORKFLOW COMPLETED ---\n");
+    if (print_logs) {
+        Serial.println("--- WORKFLOW COMPLETED ---\n");
+    }
 }
 
 /**
  * @brief Simulates transmission of the file back to a host computer.
  * Serial framing prevents raw control character collisions and enables scripting.
  */
-void sendToPC(camera_fb_t *fb) {
-    Serial.println("[Destination 1] Sending image file to PC Interface (USB)...");
+void sendToPC(camera_fb_t *fb, bool print_logs) {
+    if (print_logs) {
+        Serial.println("[Destination 1] Sending image file to PC Interface (USB)...");
+    }
     
     // Print metadata header
     Serial.printf("---START_IMAGE:%d:%d:%d:%d---\n", 
@@ -372,20 +395,27 @@ void sendToPC(camera_fb_t *fb) {
     
     // Print metadata footer
     Serial.println("---END_IMAGE---");
-    Serial.println("[Destination 1] File sent to PC successfully.");
+    
+    if (print_logs) {
+        Serial.println("[Destination 1] File sent to PC successfully.");
+    }
 }
 
 /**
  * @brief Simulates feeding the captured buffer into a Local Embedded Machine Learning model.
  * Performs statistical evaluation on the matrix.
  */
-void runLocalInference(camera_fb_t *fb) {
-    Serial.println("[Destination 2] Feeding image buffer to Local CV Model...");
+void runLocalInference(camera_fb_t *fb, bool print_logs) {
+    if (print_logs) {
+        Serial.println("[Destination 2] Feeding image buffer to Local CV Model...");
+    }
     
     // Allocate 96x96 grayscale buffer on heap to prevent stack overflow (9216 bytes exceeds ESP32 loopTask stack limits)
     uint8_t *grayscale_96 = (uint8_t *)malloc(96 * 96);
     if (!grayscale_96) {
-        Serial.println("  [CV Model] Error: Failed to allocate memory for grayscale buffer.");
+        if (print_logs) {
+            Serial.println("  [CV Model] Error: Failed to allocate memory for grayscale buffer.");
+        }
         return;
     }
     bool downscale_ok = false;
@@ -435,11 +465,15 @@ void runLocalInference(camera_fb_t *fb) {
                 }
                 downscale_ok = true;
             } else {
-                Serial.println("  [CV Model] Error: JPEG decode to RGB565 failed.");
+                if (print_logs) {
+                    Serial.println("  [CV Model] Error: JPEG decode to RGB565 failed.");
+                }
             }
             free(rgb565_buf);
         } else {
-            Serial.println("  [CV Model] Error: Failed to allocate memory for JPEG decode.");
+            if (print_logs) {
+                Serial.println("  [CV Model] Error: Failed to allocate memory for JPEG decode.");
+            }
         }
     } 
     else if (fb->format == PIXFORMAT_GRAYSCALE) {
@@ -485,34 +519,40 @@ void runLocalInference(camera_fb_t *fb) {
     }
     
     if (downscale_ok) {
-        // Run statistical evaluations on the 96x96 grayscale buffer
-        uint32_t sum = 0;
-        uint8_t min_pixel = 255;
-        uint8_t max_pixel = 0;
-        
-        for (int i = 0; i < 96 * 96; i++) {
-            uint8_t pixel = grayscale_96[i];
-            sum += pixel;
-            if (pixel < min_pixel) min_pixel = pixel;
-            if (pixel > max_pixel) max_pixel = pixel;
+        if (print_logs) {
+            // Run statistical evaluations on the 96x96 grayscale buffer
+            uint32_t sum = 0;
+            uint8_t min_pixel = 255;
+            uint8_t max_pixel = 0;
+            
+            for (int i = 0; i < 96 * 96; i++) {
+                uint8_t pixel = grayscale_96[i];
+                sum += pixel;
+                if (pixel < min_pixel) min_pixel = pixel;
+                if (pixel > max_pixel) max_pixel = pixel;
+            }
+            
+            float avg_pixel = (float)sum / (96 * 96);
+            Serial.printf("  [CV Model] 96x96 Grayscale Input Preprocessing -> Mean: %.2f | Min: %d | Max: %d\n", 
+                          avg_pixel, min_pixel, max_pixel);
+                          
+            // Render the ASCII Art preview in real-time
+            renderAsciiArt(grayscale_96, 96, 96);
+            
+            // Simulating loading tensor and inference
+            Serial.println("  [CV Model] Loading input tensor... OK.");
+            Serial.println("  [CV Model] Running inference engine (quantized model)...");
+            Serial.println("  [CV Model] Inference complete. Mock Gesture Outputs: [Palm: 94.2%, Fist: 3.1%, Wave: 2.7%]");
         }
-        
-        float avg_pixel = (float)sum / (96 * 96);
-        Serial.printf("  [CV Model] 96x96 Grayscale Input Preprocessing -> Mean: %.2f | Min: %d | Max: %d\n", 
-                      avg_pixel, min_pixel, max_pixel);
-                      
-        // Render the ASCII Art preview in real-time
-        renderAsciiArt(grayscale_96, 96, 96);
-        
-        // Simulating loading tensor and inference
-        Serial.println("  [CV Model] Loading input tensor... OK.");
-        Serial.println("  [CV Model] Running inference engine (quantized model)...");
-        Serial.println("  [CV Model] Inference complete. Mock Gesture Outputs: [Palm: 94.2%, Fist: 3.1%, Wave: 2.7%]");
     } else {
-        Serial.println("  [CV Model] Warning: Unable to downscale this format for local inference.");
+        if (print_logs) {
+            Serial.println("  [CV Model] Warning: Unable to downscale this format for local inference.");
+        }
     }
     
-    Serial.println("[Destination 2] Local CV processing complete.");
+    if (print_logs) {
+        Serial.println("[Destination 2] Local CV processing complete.");
+    }
     free(grayscale_96);
 }
 

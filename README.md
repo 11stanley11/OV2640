@@ -1,26 +1,19 @@
-# ESP32-S3 OV2640 Camera Testing & Acquisition Framework
+# ESP32-S3 OV2640 Camera Testing & Live View Framework
 
-This repository provides a testing and acquisition framework for the **ESP32-S3-N16R8-CAM** development board featuring the **OV2640** camera module. 
-
-It implements a dual-destination pipeline that captures image frames, performs statistical preprocessing/computer vision testing directly on the microcontroller, and streams base64-encoded frames to a PC via USB Serial. A companion Python script automatically receives, decodes, and saves the image files.
+This repository contains an optimized testing and live preview framework for the **ESP32-S3-N16R8-CAM** board equipped with an **OV2640** camera sensor. It provides dynamic hardware-level sensor tuning, high-speed image transmission over serial, real-time mock CV inference, and a live OpenCV GUI preview.
 
 ---
 
 ## Features
-* 📷 **Integrated OV2640 Driver Setup**: Configured out of the box using the standard `CAMERA_MODEL_ESP32S3_EYE` pin layout.
-* 🖱️ **Hardware Trigger Support**: Press the physical **BOOT/LOAD** button (GPIO 0) on the ESP32-S3 board to instantly capture and save a photo.
-* 💻 **Interactive CLI Menu**: Send commands over Serial to dynamically modify camera configurations (contrast, format, resolution, exposure, saturation).
-* ⚙️ **Dual-Destination Pipeline**:
-  * **PC Stream**: Direct, memory-efficient Base64 streaming over serial.
-  * **On-Chip Inference Sandbox**: Real-time luminance statistics, RGB channel averaging, JPEG validation, and gesture recognition mocks.
-* 🎨 **On-Chip ASCII Preview**: Renders a live 32x16 character representation of the camera frame directly to your terminal when configured for 96x96 Grayscale.
-* 🐍 **Automated Python Receiver**: Auto-detects frame boundaries, decodes Base64 data, and saves images (`.jpg`, `.gray`, `.rgb565`, `.yuv422`) locally.
 
----
-
-## Repository Structure
-* [OV2640_Camera_Test/OV2640_Camera_Test.ino](file:///c:/Codes/OV2640/OV2640_Camera_Test/OV2640_Camera_Test.ino) — Main C++ Arduino sketch for the ESP32-S3.
-* [serial_receiver.py](file:///c:/Codes/OV2640/serial_receiver.py) — Python receiver script to capture and decode streamed images.
+* **High-Speed Serial Streaming:** Configured at **2,000,000 baud** (2M) to maximize transmission frame rate, unlocking smooth live video feeds.
+* **Interactive Live Preview Window:** Renders real-time camera streams using OpenCV. Small frames (like 96x96) are automatically upscaled 4x with crisp nearest-neighbor interpolation.
+* **On-the-Fly Configuration Overrides:** Change camera formats, resolutions, brightness, exposure, mirror, flip, and gain controls directly from the console in real-time while streaming.
+* **Dual-Destination Output Architecture:**
+  1. **USB PC Interface:** Decodes Base64 packets and automatically generates both raw (`.gray`, `.rgb565`, `.jpg`) and convert-to-PNG outputs under `./captured_images`.
+  2. **On-Chip CV Processing Pipeline:** Dynamic downscaling and pre-processing to a standardized `96x96` Grayscale buffer for ML tensor feeds (heap-allocated to prevent stack overflows).
+* **Guaranteed Exposure Freshness:** Flushes the camera DMA queue to ensure all snapshots are captured in real-time, eliminating stale/previous frame lag.
+* **Log-Suppressed Streaming:** Suppresses verbose diagnostic prints during continuous streaming to preserve serial bandwidth, while automatically enabling full reports and terminal ASCII art reviews on manual capture commands.
 
 ---
 
@@ -31,7 +24,7 @@ It implements a dual-destination pipeline that captures image frames, performs s
 * USB-C cable for programming and serial communication.
 
 ### 2. Arduino IDE Compilation Settings
-Because this board relies on an **N16R8** configuration (16MB Flash, 8MB PSRAM), you must enable external memory in your IDE settings, otherwise the camera initialization will fail:
+Because this board relies on an **N16R8** configuration (16MB Flash, 8MB PSRAM), you must configure external memory in your IDE settings:
 1. Open the Arduino IDE and load `OV2640_Camera_Test.ino`.
 2. Go to **Tools** ➡️ **Board** ➡️ **ESP32S3 Dev Module** (under the ESP32 platform).
 3. Go to **Tools** ➡️ **PSRAM** ➡️ Select **OPI PSRAM** (Crucial: 8MB PSRAM requires OPI mode).
@@ -39,9 +32,9 @@ Because this board relies on an **N16R8** configuration (16MB Flash, 8MB PSRAM),
 5. Compile and upload the sketch to the board.
 
 ### 3. Setting Up the Python Receiver
-Install the standard `pyserial` dependency if you haven't already:
+Install dependencies (Pillow, OpenCV, and NumPy are required for the live GUI preview):
 ```bash
-pip install pyserial
+pip install pyserial Pillow opencv-python numpy
 ```
 
 #### Identify your COM Port:
@@ -58,7 +51,7 @@ COM_PORT = 'COM9'  # Update this to match your system
 
 ---
 
-## How to Capture Images
+## How to Run & Capture Images
 
 Only one program can access a serial port at a time. If you leave the Arduino IDE Serial Monitor open, the Python script will fail with an *Access is denied* error.
 
@@ -67,24 +60,29 @@ Only one program can access a serial port at a time. If you leave the Arduino ID
    ```bash
    python .\serial_receiver.py
    ```
-3. Trigger a capture using one of the following methods:
-   * **Method A (Hardware):** Press the physical **BOOT** / **LOAD** button on the ESP32-S3 board.
-   * **Method B (CLI):** Connect using a serial terminal (when the Python script is not running) and send the `c` command.
-4. The image will be processed, transmitted, and decoded under the `./captured_images` folder.
+3. A **Live GUI Preview window** will automatically open and initiate continuous live streaming from the camera.
+4. **Trigger a capture:**
+   * **Method A (GUI Window):** Focus the GUI window and press `c` or `Space` to save the current frame. This also triggers the full on-chip CV diagnostics and ASCII art preview in the terminal.
+   * **Method B (CLI Terminal):** Type `c` in the terminal and press Enter.
+   * **Method C (Hardware Pin):** Press the physical **BOOT** / **LOAD** button on the ESP32-S3 board.
+5. **Exit Stream:** Press `q` or `Esc` in the GUI window to close the stream cleanly.
 
 ---
 
 ## Serial Command Reference
 
+Type commands in the CLI terminal and press Enter to update configurations in real-time.
+
 | Command | Action | Description |
 |:---:|:---|:---|
 | **`h`** | Help Menu | Prints the command list and current camera state. |
-| **`c`** | Capture Image | Triggers the dual-destination acquisition workflow. |
+| **`c`** | Capture Image | Triggers a fresh acquisition workflow with full terminal reports. |
+| **`d1`** / **`d0`** | Stream Mode | Start / Stop continuous streaming. |
 | **`f0`** | Format: Grayscale | Raw 1 byte per pixel. |
 | **`f1`** | Format: RGB565 | 2 bytes per pixel (Big Endian). |
 | **`f2`** | Format: YUV422 | 2 bytes per pixel. |
 | **`f3`** | Format: JPEG | Compressed format (required for high resolutions). |
-| **`s0`** | Res: 96x96 | Grayscale mode enables the CLI ASCII art preview. |
+| **`s0`** | Res: 96x96 | 96x96 pixels. |
 | **`s1`** | Res: QQVGA | 160x120 pixels. |
 | **`s2`** | Res: QVGA | 320x240 pixels. |
 | **`s3`** | Res: VGA | 640x480 pixels. |
