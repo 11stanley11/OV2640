@@ -77,7 +77,8 @@ def read_serial_thread():
                         else:
                             ext = "bin"
                             
-                        filename = f"image_{metadata.get('width','96')}x{metadata.get('height','96')}_{len(img_bytes)}.{ext}"
+                        timestamp = time.strftime("%Y%m%d_%H%M%S")
+                        filename = f"image_{timestamp}_{metadata.get('width','96')}x{metadata.get('height','96')}_{len(img_bytes)}.{ext}"
                         filepath = os.path.join(OUTPUT_DIR, filename)
                         
                         with open(filepath, "wb") as f:
