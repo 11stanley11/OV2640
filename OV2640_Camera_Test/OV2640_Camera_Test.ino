@@ -1,7 +1,8 @@
 #include "esp_camera.h"
+#include "img_converters.h"
 
 // ==========================================
-// 📸 GPIO Wiring Pin Configuration for ESP32-S3
+// GPIO Wiring Pin Configuration for ESP32-S3
 // ==========================================
 #define PWDN_GPIO_NUM    -1  // Tie to GND to keep camera enabled
 #define RESET_GPIO_NUM   -1  // Tie to 3.3V to keep camera enabled
@@ -23,7 +24,7 @@
 #define PCLK_GPIO_NUM    13  // Pixel Clock
 
 // ==========================================
-// 🛠️ Globals & State Variables
+// Globals & State Variables
 // ==========================================
 camera_config_t config;
 pixformat_t current_format = PIXFORMAT_GRAYSCALE;
@@ -32,14 +33,17 @@ framesize_t current_framesize = FRAMESIZE_96X96;
 String inputString = "";
 bool stringComplete = false;
 
+// Hardware BOOT/LOAD Button configuration
+#define BOOT_BUTTON_PIN 0
+int lastButtonState = HIGH;
+
 // Base64 lookup table
 const char b64_table[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 // ==========================================
-// 🏷️ Forward Declarations & Helpers
+// Forward Declarations & Helpers
 // ==========================================
 bool initCameraWithConfig(pixformat_t format, framesize_t size);
-void printHelpMenu();
 void parseCommand(String cmd);
 void captureWorkflow();
 void sendToPC(camera_fb_t *fb);
@@ -47,7 +51,6 @@ void runLocalInference(camera_fb_t *fb);
 void renderAsciiArt(const uint8_t* buf, int width, int height);
 void print_base64(const uint8_t* data, size_t length);
 const char* format_to_str(pixformat_t format);
-const char* framesize_to_str(framesize_t size);
 
 void setup() {
     // Initialize Serial Port at high baud rate for fast image transfers
@@ -58,18 +61,21 @@ void setup() {
     
     delay(2000); // Give user time to open the Serial Monitor
     Serial.println("\n\n=============================================");
-    Serial.println("🚀 ESP32-S3 OV2640 Camera Testing Framework");
+    Serial.println("ESP32-S3 OV2640 Camera Testing Framework");
     Serial.println("=============================================");
+    
+    // Configure BOOT/LOAD button pin as input with pullup
+    pinMode(BOOT_BUTTON_PIN, INPUT_PULLUP);
     
     // Initialize Camera with default configuration (Grayscale, 96x96)
     if (!initCameraWithConfig(current_format, current_framesize)) {
-        Serial.println("❌ ERROR: Camera initialization failed during startup!");
+        Serial.println("ERROR: Camera initialization failed during startup!");
     } else {
-        Serial.println("✅ Camera initialized successfully with default parameters.");
+        Serial.println("Camera initialized successfully with default parameters.");
     }
     
-    // Print user interface CLI menu
-    printHelpMenu();
+    // Print user interface CLI menu (silenced for python controller)
+    // printHelpMenu();
 }
 
 void loop() {
@@ -93,6 +99,17 @@ void loop() {
         inputString = "";
         stringComplete = false;
     }
+
+    // Check BOOT/LOAD button press (active low)
+    int buttonState = digitalRead(BOOT_BUTTON_PIN);
+    if (buttonState == LOW && lastButtonState == HIGH) {
+        delay(50); // Simple debounce delay
+        if (digitalRead(BOOT_BUTTON_PIN) == LOW) {
+            Serial.println("\n[Button] Boot/Load button pressed! Triggering capture...");
+            captureWorkflow();
+        }
+    }
+    lastButtonState = buttonState;
 }
 
 /**
@@ -141,14 +158,14 @@ bool initCameraWithConfig(pixformat_t format, framesize_t size) {
         
         // Memory Warning Check
         if (format != PIXFORMAT_JPEG && size > FRAMESIZE_QVGA) {
-            Serial.println("⚠️ WARNING: Raw buffer size may exceed SRAM capacity! High resolutions (VGA+) without PSRAM may crash.");
+            Serial.println("WARNING: Raw buffer size may exceed SRAM capacity! High resolutions (VGA+) without PSRAM may crash.");
         }
     #endif
 
     // Initialise driver
     esp_err_t err = esp_camera_init(&config);
     if (err != ESP_OK) {
-        Serial.printf("❌ Camera init failed with error: 0x%x\n", err);
+        Serial.printf("Camera init failed with error: 0x%x\n", err);
         return false;
     }
     
@@ -185,11 +202,6 @@ void parseCommand(String cmd) {
     sensor_t * s = esp_camera_sensor_get();
     
     switch (action) {
-        case 'h':
-        case 'H':
-            printHelpMenu();
-            break;
-            
         case 'c':
         case 'C':
             captureWorkflow();
@@ -202,14 +214,10 @@ void parseCommand(String cmd) {
             else if (val == 1) new_fmt = PIXFORMAT_RGB565;
             else if (val == 2) new_fmt = PIXFORMAT_YUV422;
             else if (val == 3) new_fmt = PIXFORMAT_JPEG;
-            else {
-                Serial.println("❌ Error: Invalid format (0=Grayscale, 1=RGB565, 2=YUV422, 3=JPEG)");
-                break;
-            }
-            Serial.printf("🔄 Changing pixel format to %s...\n", format_to_str(new_fmt));
+            else break;
+            
             if (initCameraWithConfig(new_fmt, current_framesize)) {
                 current_format = new_fmt;
-                Serial.println("✅ Format updated.");
             }
             break;
         }
@@ -223,14 +231,10 @@ void parseCommand(String cmd) {
             else if (val == 3) new_size = FRAMESIZE_VGA;
             else if (val == 4) new_size = FRAMESIZE_SVGA;
             else if (val == 5) new_size = FRAMESIZE_UXGA;
-            else {
-                Serial.println("❌ Error: Invalid resolution (0=96x96, 1=QQVGA, 2=QVGA, 3=VGA, 4=SVGA, 5=UXGA)");
-                break;
-            }
-            Serial.printf("🔄 Changing resolution to %s...\n", framesize_to_str(new_size));
+            else break;
+            
             if (initCameraWithConfig(current_format, new_size)) {
                 current_framesize = new_size;
-                Serial.println("✅ Resolution updated.");
             }
             break;
         }
@@ -239,21 +243,13 @@ void parseCommand(String cmd) {
         case 'E':
             if (s) {
                 s->set_exposure_ctrl(s, val ? 1 : 0);
-                Serial.printf("⚙️ Auto Exposure Control (AEC) set to %s\n", val ? "AUTO" : "MANUAL");
-            } else {
-                Serial.println("❌ Error: Sensor interface not available.");
             }
             break;
             
         case 'v':
         case 'V':
             if (s) {
-                if (val < 0) val = 0;
-                if (val > 1200) val = 1200;
                 s->set_aec_value(s, val);
-                Serial.printf("⚙️ Manual Exposure set to %d (AEC must be disabled for this to take effect)\n", val);
-            } else {
-                Serial.println("❌ Error: Sensor interface not available.");
             }
             break;
             
@@ -261,137 +257,67 @@ void parseCommand(String cmd) {
         case 'G':
             if (s) {
                 s->set_gain_ctrl(s, val ? 1 : 0);
-                Serial.printf("⚙️ Auto Gain Control (AGC) set to %s\n", val ? "AUTO" : "MANUAL");
-            } else {
-                Serial.println("❌ Error: Sensor interface not available.");
             }
             break;
             
         case 'a':
         case 'A':
             if (s) {
-                if (val < 0) val = 0;
-                if (val > 30) val = 30;
-                s->set_agc_value(s, val);
-                Serial.printf("⚙️ Manual Gain set to %d (AGC must be disabled for this to take effect)\n", val);
-            } else {
-                Serial.println("❌ Error: Sensor interface not available.");
+                s->set_agc_gain(s, val);
             }
             break;
             
         case 'b':
         case 'B':
             if (s) {
-                if (val < -2) val = -2;
-                if (val > 2) val = 2;
                 s->set_brightness(s, val);
-                Serial.printf("⚙️ Brightness set to %d\n", val);
-            } else {
-                Serial.println("❌ Error: Sensor interface not available.");
             }
             break;
             
         case 't':
         case 'T':
             if (s) {
-                if (val < -2) val = -2;
-                if (val > 2) val = 2;
                 s->set_contrast(s, val);
-                Serial.printf("⚙️ Contrast set to %d\n", val);
-            } else {
-                Serial.println("❌ Error: Sensor interface not available.");
             }
             break;
             
         case 'x':
         case 'X':
             if (s) {
-                if (val < -2) val = -2;
-                if (val > 2) val = 2;
                 s->set_saturation(s, val);
-                Serial.printf("⚙️ Saturation set to %d\n", val);
-            } else {
-                Serial.println("❌ Error: Sensor interface not available.");
             }
             break;
-
+ 
         case 'm':
         case 'M':
             if (s) {
                 s->set_hmirror(s, val ? 1 : 0);
-                Serial.printf("⚙️ Horizontal Mirror: %s\n", val ? "ENABLED" : "DISABLED");
-            } else {
-                Serial.println("❌ Error: Sensor interface not available.");
             }
             break;
-
+ 
         case 'p':
         case 'P':
             if (s) {
                 s->set_vflip(s, val ? 1 : 0);
-                Serial.printf("⚙️ Vertical Flip: %s\n", val ? "ENABLED" : "DISABLED");
-            } else {
-                Serial.println("❌ Error: Sensor interface not available.");
             }
             break;
             
         default:
-            Serial.println("❓ Unknown Command. Send 'h' to show the help menu.");
             break;
     }
-}
-
-/**
- * @brief Prints the interactive CLI instructions and current status.
- */
-void printHelpMenu() {
-    Serial.println("\n-------------------------------------------------------------");
-    Serial.println("📖 OV2640 CLI TESTING INSTRUCTIONS");
-    Serial.println("Send commands over serial in '<command><value>' format.");
-    Serial.println("Example: 'c' to capture, 'f1' to change format to RGB565");
-    Serial.println("-------------------------------------------------------------");
-    Serial.println("📁 General commands:");
-    Serial.println("  h        - Display this menu");
-    Serial.println("  c        - Trigger image acquisition (Dual-Destination workflow)");
-    Serial.println("\n🎨 Pixel Format (f <0-3>):");
-    Serial.println("  f0       - GRAYSCALE (1 byte per pixel)");
-    Serial.println("  f1       - RGB565    (2 bytes per pixel, Big Endian)");
-    Serial.println("  f2       - YUV422    (2 bytes per pixel)");
-    Serial.println("  f3       - JPEG      (Compressed, variable size)");
-    Serial.println("\n📐 Resolution (s <0-5>):");
-    Serial.println("  s0       - 96x96");
-    Serial.println("  s1       - QQVGA (160x120)");
-    Serial.println("  s2       - QVGA  (320x240)");
-    Serial.println("  s3       - VGA   (640x480)");
-    Serial.println("  s4       - SVGA  (800x600)");
-    Serial.println("  s5       - UXGA  (1600x1200) (Use JPEG format for RAM safety)");
-    Serial.println("\n☀️ Exposure & Sensor Controls:");
-    Serial.println("  e1 / e0  - Enable/Disable Auto Exposure Control (AEC)");
-    Serial.println("  v <0-1200>- Manual Exposure index (Only active when AEC is disabled)");
-    Serial.println("  g1 / g0  - Enable/Disable Auto Gain Control (AGC)");
-    Serial.println("  a <0-30> - Manual Gain index (Only active when AGC is disabled)");
-    Serial.println("  b <value>- Set Brightness (-2 to 2)");
-    Serial.println("  t <value>- Set Contrast (-2 to 2)");
-    Serial.println("  x <value>- Set Saturation (-2 to 2)");
-    Serial.println("  m1 / m0  - Enable/Disable Horizontal Mirror");
-    Serial.println("  p1 / p0  - Enable/Disable Vertical Flip");
-    Serial.println("-------------------------------------------------------------");
-    Serial.printf("📊 Current State: Format = %s | Resolution = %s\n", 
-                  format_to_str(current_format), framesize_to_str(current_framesize));
-    Serial.println("-------------------------------------------------------------\n");
 }
 
 /**
  * @brief Main execution workflow. Acquires the image and channels it to two destinations.
  */
 void captureWorkflow() {
-    Serial.println("\n🎬 --- WORKFLOW INITIATED ---");
+    Serial.println("\n--- WORKFLOW INITIATED ---");
     Serial.println("[System] Capturing frame buffer...");
     
     camera_fb_t * fb = esp_camera_fb_get();
     if (!fb) {
-        Serial.println("❌ ERROR: Failed to acquire camera frame buffer.");
-        Serial.println("🎬 --- WORKFLOW ABORTED ---\n");
+        Serial.println("ERROR: Failed to acquire camera frame buffer.");
+        Serial.println("--- WORKFLOW ABORTED ---\n");
         return;
     }
     
@@ -411,7 +337,7 @@ void captureWorkflow() {
     // Always return the frame buffer to the pool
     esp_camera_fb_return(fb);
     
-    Serial.println("🎬 --- WORKFLOW COMPLETED ---\n");
+    Serial.println("--- WORKFLOW COMPLETED ---\n");
 }
 
 /**
@@ -419,7 +345,7 @@ void captureWorkflow() {
  * Serial framing prevents raw control character collisions and enables scripting.
  */
 void sendToPC(camera_fb_t *fb) {
-    Serial.println("🖥️ [Destination 1] Sending image file to PC Interface (USB)...");
+    Serial.println("[Destination 1] Sending image file to PC Interface (USB)...");
     
     // Print metadata header
     Serial.printf("---START_IMAGE:%d:%d:%d:%d---\n", 
@@ -430,7 +356,7 @@ void sendToPC(camera_fb_t *fb) {
     
     // Print metadata footer
     Serial.println("---END_IMAGE---");
-    Serial.println("🖥️ [Destination 1] File sent to PC successfully.");
+    Serial.println("[Destination 1] File sent to PC successfully.");
 }
 
 /**
@@ -438,87 +364,135 @@ void sendToPC(camera_fb_t *fb) {
  * Performs statistical evaluation on the matrix.
  */
 void runLocalInference(camera_fb_t *fb) {
-    Serial.println("🧠 [Destination 2] Feeding image buffer to Local CV Model...");
+    Serial.println("[Destination 2] Feeding image buffer to Local CV Model...");
     
-    // Mock preprocessing dimensions check
-    Serial.printf("  [CV Model] Input tensor target shape: %dx%dx%d\n", 
-                  fb->height, fb->width, (fb->format == PIXFORMAT_GRAYSCALE) ? 1 : 3);
+    // Allocate 96x96 grayscale buffer
+    uint8_t grayscale_96[96 * 96];
+    bool downscale_ok = false;
     
-    // Extract real-time metrics based on format structure
-    if (fb->format == PIXFORMAT_GRAYSCALE) {
+    if (fb->format == PIXFORMAT_JPEG) {
+        // Decode JPEG with downscaling if possible
+        esp_jpeg_image_scale_t scale = JPG_SCALE_NONE;
+        int out_width = fb->width;
+        int out_height = fb->height;
+        
+        if (fb->width >= 1600) {
+            scale = JPG_SCALE_8X;
+            out_width = fb->width / 8;
+            out_height = fb->height / 8;
+        } else if (fb->width >= 800) {
+            scale = JPG_SCALE_8X;
+            out_width = fb->width / 8;
+            out_height = fb->height / 8;
+        } else if (fb->width >= 640) {
+            scale = JPG_SCALE_4X;
+            out_width = fb->width / 4;
+            out_height = fb->height / 4;
+        } else if (fb->width >= 320) {
+            scale = JPG_SCALE_2X;
+            out_width = fb->width / 2;
+            out_height = fb->height / 2;
+        }
+        
+        // Allocate temporary buffer for decoded RGB565 image
+        uint8_t * rgb565_buf = (uint8_t *)malloc(out_width * out_height * 2);
+        if (rgb565_buf) {
+            if (jpg2rgb565(fb->buf, fb->len, rgb565_buf, scale)) {
+                // Downscale out_width x out_height RGB565 to 96x96 Grayscale
+                for (int y = 0; y < 96; y++) {
+                    int src_y = (y * out_height) / 96;
+                    for (int x = 0; x < 96; x++) {
+                        int src_x = (x * out_width) / 96;
+                        int src_idx = (src_y * out_width + src_x) * 2;
+                        uint16_t pixel = (rgb565_buf[src_idx] << 8) | rgb565_buf[src_idx + 1];
+                        
+                        uint8_t r = ((pixel >> 11) & 0x1F) << 3;
+                        uint8_t g = ((pixel >> 5) & 0x3F) << 2;
+                        uint8_t b = (pixel & 0x1F) << 3;
+                        
+                        grayscale_96[y * 96 + x] = (uint8_t)(0.299f * r + 0.587f * g + 0.114f * b);
+                    }
+                }
+                downscale_ok = true;
+            } else {
+                Serial.println("  [CV Model] Error: JPEG decode to RGB565 failed.");
+            }
+            free(rgb565_buf);
+        } else {
+            Serial.println("  [CV Model] Error: Failed to allocate memory for JPEG decode.");
+        }
+    } 
+    else if (fb->format == PIXFORMAT_GRAYSCALE) {
+        // Direct downscale from Grayscale
+        for (int y = 0; y < 96; y++) {
+            int src_y = (y * fb->height) / 96;
+            for (int x = 0; x < 96; x++) {
+                int src_x = (x * fb->width) / 96;
+                grayscale_96[y * 96 + x] = fb->buf[src_y * fb->width + src_x];
+            }
+        }
+        downscale_ok = true;
+    } 
+    else if (fb->format == PIXFORMAT_RGB565) {
+        // Direct downscale from RGB565
+        for (int y = 0; y < 96; y++) {
+            int src_y = (y * fb->height) / 96;
+            for (int x = 0; x < 96; x++) {
+                int src_x = (x * fb->width) / 96;
+                int src_idx = (src_y * fb->width + src_x) * 2;
+                uint16_t pixel = (fb->buf[src_idx] << 8) | fb->buf[src_idx + 1];
+                
+                uint8_t r = ((pixel >> 11) & 0x1F) << 3;
+                uint8_t g = ((pixel >> 5) & 0x3F) << 2;
+                uint8_t b = (pixel & 0x1F) << 3;
+                
+                grayscale_96[y * 96 + x] = (uint8_t)(0.299f * r + 0.587f * g + 0.114f * b);
+            }
+        }
+        downscale_ok = true;
+    } 
+    else if (fb->format == PIXFORMAT_YUV422) {
+        // Direct downscale from YUV422 (Luminance Y is at even indices)
+        for (int y = 0; y < 96; y++) {
+            int src_y = (y * fb->height) / 96;
+            for (int x = 0; x < 96; x++) {
+                int src_x = (x * fb->width) / 96;
+                int src_idx = (src_y * fb->width + src_x) * 2;
+                grayscale_96[y * 96 + x] = fb->buf[src_idx];
+            }
+        }
+        downscale_ok = true;
+    }
+    
+    if (downscale_ok) {
+        // Run statistical evaluations on the 96x96 grayscale buffer
         uint32_t sum = 0;
         uint8_t min_pixel = 255;
         uint8_t max_pixel = 0;
         
-        for (size_t i = 0; i < fb->len; i++) {
-            uint8_t pixel = fb->buf[i];
+        for (int i = 0; i < 96 * 96; i++) {
+            uint8_t pixel = grayscale_96[i];
             sum += pixel;
             if (pixel < min_pixel) min_pixel = pixel;
             if (pixel > max_pixel) max_pixel = pixel;
         }
         
-        float avg_pixel = (float)sum / fb->len;
-        Serial.printf("  [CV Model] Grayscale Preprocessor -> Mean: %.2f | Min: %d | Max: %d\n", 
+        float avg_pixel = (float)sum / (96 * 96);
+        Serial.printf("  [CV Model] 96x96 Grayscale Input Preprocessing -> Mean: %.2f | Min: %d | Max: %d\n", 
                       avg_pixel, min_pixel, max_pixel);
                       
-        // For the 96x96 Grayscale configuration (training configuration), render ASCII visualization
-        if (fb->width == 96 && fb->height == 96) {
-            renderAsciiArt(fb->buf, fb->width, fb->height);
-        }
-    } 
-    else if (fb->format == PIXFORMAT_RGB565) {
-        // Extract averages for R, G, B channels from packed RGB565 (16-bit)
-        uint32_t sum_r = 0, sum_g = 0, sum_b = 0;
-        size_t total_pixels = fb->len / 2;
+        // Render the ASCII Art preview in real-time
+        renderAsciiArt(grayscale_96, 96, 96);
         
-        for (size_t i = 0; i < fb->len; i += 2) {
-            // Unpack 16-bit pixel (Big Endian)
-            uint16_t pixel = (fb->buf[i] << 8) | fb->buf[i+1];
-            uint8_t r = ((pixel >> 11) & 0x1F) << 3; // Scale 5-bit R to 8-bit
-            uint8_t g = ((pixel >> 5) & 0x3F) << 2;  // Scale 6-bit G to 8-bit
-            uint8_t b = (pixel & 0x1F) << 3;         // Scale 5-bit B to 8-bit
-            sum_r += r;
-            sum_g += g;
-            sum_b += b;
-        }
-        
-        Serial.printf("  [CV Model] RGB565 Preprocessor -> Average Channels: R=%.1f, G=%.1f, B=%.1f\n", 
-                      (float)sum_r / total_pixels, 
-                      (float)sum_g / total_pixels, 
-                      (float)sum_b / total_pixels);
-    } 
-    else if (fb->format == PIXFORMAT_YUV422) {
-        // YUV422 stores alternating bytes: Y0 U0 Y1 V0
-        // Extract average luminance Y
-        uint32_t sum_y = 0;
-        size_t total_pixels = fb->len / 2;
-        for (size_t i = 0; i < fb->len; i += 2) {
-            sum_y += fb->buf[i]; // Luminance is at even indices
-        }
-        Serial.printf("  [CV Model] YUV422 Preprocessor -> Average Luminance (Y): %.2f\n", 
-                      (float)sum_y / total_pixels);
-    } 
-    else if (fb->format == PIXFORMAT_JPEG) {
-        // JPEG data is compressed, perform header verification
-        if (fb->len >= 4 && fb->buf[0] == 0xFF && fb->buf[1] == 0xD8 && 
-            fb->buf[fb->len-2] == 0xFF && fb->buf[fb->len-1] == 0xD9) {
-            Serial.println("  [CV Model] JPEG Validator -> SOI (0xFFD8) and EOI (0xFFD9) markers verified.");
-        } else {
-            Serial.println("  ⚠️ [CV Model] JPEG Validator -> WARNING: Missing start or end markers. Data might be incomplete.");
-        }
+        // Simulating loading tensor and inference
+        Serial.println("  [CV Model] Loading input tensor... OK.");
+        Serial.println("  [CV Model] Running inference engine (quantized model)...");
+        Serial.println("  [CV Model] Inference complete. Mock Gesture Outputs: [Palm: 94.2%, Fist: 3.1%, Wave: 2.7%]");
+    } else {
+        Serial.println("  [CV Model] Warning: Unable to downscale this format for local inference.");
     }
     
-    // Simulate inference invocation
-    Serial.println("  [CV Model] Loading input tensor... OK.");
-    Serial.println("  [CV Model] Running inference engine (quantized model)...");
-    
-    // In actual code:
-    // float* model_input = tflite::GetTensorData<float>(input_tensor);
-    // model_input[x] = (float)pixel / 255.0f; // normalization
-    // TfLiteStatus status = interpreter.Invoke();
-    
-    Serial.println("  [CV Model] Inference complete. Mock Gesture Outputs: [Palm: 94.2%, Fist: 3.1%, Wave: 2.7%]");
-    Serial.println("🧠 [Destination 2] Local CV processing complete.");
+    Serial.println("[Destination 2] Local CV processing complete.");
 }
 
 /**
@@ -616,14 +590,3 @@ const char* format_to_str(pixformat_t format) {
     }
 }
 
-const char* framesize_to_str(framesize_t size) {
-    switch (size) {
-        case FRAMESIZE_96X96:   return "96x96";
-        case FRAMESIZE_QQVGA:   return "QQVGA (160x120)";
-        case FRAMESIZE_QVGA:    return "QVGA (320x240)";
-        case FRAMESIZE_VGA:     return "VGA (640x480)";
-        case FRAMESIZE_SVGA:    return "SVGA (800x600)";
-        case FRAMESIZE_UXGA:    return "UXGA (1600x1200)";
-        default:                return "UNKNOWN";
-    }
-}
