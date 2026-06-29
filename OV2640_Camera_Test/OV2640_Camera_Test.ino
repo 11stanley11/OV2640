@@ -145,6 +145,7 @@ bool initCameraWithConfig(pixformat_t format, framesize_t size) {
     config.pixel_format = format;
     config.frame_size = size;
     config.jpeg_quality = 12; // 0-63 (lower values mean higher quality)
+    config.grab_mode = CAMERA_GRAB_LATEST;
     
     // Dynamic buffer location allocation based on PSRAM support
     #if defined(BOARD_HAS_PSRAM) || defined(CONFIG_SPIRAM_SUPPORT)
@@ -314,6 +315,21 @@ void captureWorkflow() {
     Serial.println("\n--- WORKFLOW INITIATED ---");
     Serial.println("[System] Capturing frame buffer...");
     
+    // Grab all currently filled buffers to empty the queue completely and force a fresh capture
+    camera_fb_t * fbs[2] = {NULL, NULL};
+    int grab_limit = (config.fb_count > 2) ? 2 : config.fb_count;
+    for (int i = 0; i < grab_limit; i++) {
+        fbs[i] = esp_camera_fb_get();
+    }
+    
+    // Return them all back to the pool to trigger fresh capture cycles
+    for (int i = 0; i < grab_limit; i++) {
+        if (fbs[i]) {
+            esp_camera_fb_return(fbs[i]);
+        }
+    }
+    
+    // The next get is guaranteed to block and return a fresh real-time capture
     camera_fb_t * fb = esp_camera_fb_get();
     if (!fb) {
         Serial.println("ERROR: Failed to acquire camera frame buffer.");
@@ -366,8 +382,12 @@ void sendToPC(camera_fb_t *fb) {
 void runLocalInference(camera_fb_t *fb) {
     Serial.println("[Destination 2] Feeding image buffer to Local CV Model...");
     
-    // Allocate 96x96 grayscale buffer
-    uint8_t grayscale_96[96 * 96];
+    // Allocate 96x96 grayscale buffer on heap to prevent stack overflow (9216 bytes exceeds ESP32 loopTask stack limits)
+    uint8_t *grayscale_96 = (uint8_t *)malloc(96 * 96);
+    if (!grayscale_96) {
+        Serial.println("  [CV Model] Error: Failed to allocate memory for grayscale buffer.");
+        return;
+    }
     bool downscale_ok = false;
     
     if (fb->format == PIXFORMAT_JPEG) {
@@ -493,6 +513,7 @@ void runLocalInference(camera_fb_t *fb) {
     }
     
     Serial.println("[Destination 2] Local CV processing complete.");
+    free(grayscale_96);
 }
 
 /**
